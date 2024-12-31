@@ -47,7 +47,7 @@ public abstract class SharedNanoChatSystem : EntitySystem
     /// <summary>
     ///     Sets the NanoChat number for a card.
     /// </summary>
-    public void SetNumber(Entity<NanoChatCardComponent?> card, uint number)
+    public virtual void SetNumber(Entity<NanoChatCardComponent?> card, uint number)
     {
         if (!Resolve(card, ref card.Comp))
             return;

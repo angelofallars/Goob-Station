@@ -4,9 +4,12 @@ using Content.Server.Administration.Logs;
 using Content.Server.Kitchen.Components;
 using Content.Server.NameIdentifier;
 using Content.Shared.Database;
+using Content.Shared.GameTicking;
 using Content.Shared._DeltaV.CartridgeLoader.Cartridges;
 using Content.Shared._DeltaV.NanoChat;
 using Content.Shared.NameIdentifier;
+using Content.Shared.PDA;
+using Robust.Shared.Containers;
 using Robust.Shared.Prototypes;
 using Robust.Shared.Random;
 
@@ -23,11 +26,47 @@ public sealed class NanoChatSystem : SharedNanoChatSystem
 
     private readonly ProtoId<NameIdentifierGroupPrototype> _nameIdentifierGroup = "NanoChat";
 
+    /// <summary>
+    ///     Lookup table to use a card number to get the associated NanoChatCard.
+    /// </summary>
+    [ViewVariables]
+    public readonly Dictionary<uint, Dictionary<EntityUid, NanoChatCardComponent>> NanoChatCards = new();
+
     public override void Initialize()
     {
         base.Initialize();
-        SubscribeLocalEvent<NanoChatCardComponent, MapInitEvent>(OnCardInit);
+
+        SubscribeLocalEvent<NanoChatCardComponent, EntGotInsertedIntoContainerMessage>(OnInserted);
+        SubscribeLocalEvent<NanoChatCardComponent, EntGotRemovedFromContainerMessage>(OnRemoved);
+
         SubscribeLocalEvent<NanoChatCardComponent, BeingMicrowavedEvent>(OnMicrowaved, after: [typeof(IdCardSystem)]);
+
+        SubscribeLocalEvent<NanoChatCardComponent, MapInitEvent>(OnCardInit);
+        SubscribeLocalEvent<NanoChatCardComponent, ComponentShutdown>(OnCardShutdown);
+
+        SubscribeLocalEvent<RoundRestartCleanupEvent>(Reset);
+    }
+
+    private void OnInserted(Entity<NanoChatCardComponent> ent, ref EntGotInsertedIntoContainerMessage args)
+    {
+        if (args.Container.ID != PdaComponent.PdaIdSlotId)
+            return;
+
+        ent.Comp.PdaUid = args.Container.Owner;
+
+        RaiseLocalEvent(args.Container.Owner, new NanoChatCardAdjustedEvent(ent.Owner));
+    }
+
+    private void OnRemoved(Entity<NanoChatCardComponent> ent, ref EntGotRemovedFromContainerMessage args)
+    {
+        if (args.Container.ID != PdaComponent.PdaIdSlotId)
+            return;
+
+        var pdaUid = ent.Comp.PdaUid;
+        ent.Comp.PdaUid = null;
+
+        if (pdaUid is not null)
+            RaiseLocalEvent(pdaUid.Value, new NanoChatCardAdjustedEvent(null));
     }
 
     private void OnMicrowaved(Entity<NanoChatCardComponent> ent, ref BeingMicrowavedEvent args)
@@ -126,5 +165,56 @@ public sealed class NanoChatSystem : SharedNanoChatSystem
         _name.GenerateUniqueName(ent, _nameIdentifierGroup, out var number);
         ent.Comp.Number = (uint)number;
         Dirty(ent);
+
+        // Make sure we can easily use the number to lookup Entity<NanoChatCardComponent>
+        if (!NanoChatCards.ContainsKey((uint)number))
+            NanoChatCards[(uint)number] = new();
+
+        NanoChatCards[(uint)number][ent.Owner] = ent.Comp;
+    }
+
+    private void OnCardShutdown(Entity<NanoChatCardComponent> ent, ref ComponentShutdown args)
+    {
+        if (ent.Comp.Number is null ||
+            !NanoChatCards.TryGetValue(ent.Comp.Number.Value, out var cards))
+            return;
+
+        cards.Remove(ent.Owner);
+    }
+
+    public override void SetNumber(Entity<NanoChatCardComponent?> card, uint number)
+    {
+        if (!Resolve(card, ref card.Comp))
+            return;
+
+        var oldNumber = card.Comp?.Number;
+        base.SetNumber(card, number);
+
+        if (oldNumber != null && NanoChatCards.TryGetValue(oldNumber.Value, out var cards))
+            cards.Remove(card.Owner);
+
+        if (!NanoChatCards.ContainsKey(number))
+            NanoChatCards[number] = new();
+
+        if (card.Comp != null)
+            NanoChatCards[number][card.Owner] = card.Comp;
+    }
+
+    public void Reset(RoundRestartCleanupEvent ev)
+    {
+        NanoChatCards.Clear();
+    }
+}
+
+/// <summary>
+///     Raised when a card is inserted or removed from a PDA.
+/// </summary>
+public sealed class NanoChatCardAdjustedEvent : EntityEventArgs
+{
+    public EntityUid? NewCard;
+
+    public NanoChatCardAdjustedEvent(EntityUid? newCard)
+    {
+        NewCard = newCard;
     }
 }
